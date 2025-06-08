@@ -7,23 +7,38 @@
 #include "timer.h"
 
 /*local macros*/
-#define PROCESSOR_CLOCK			    (16000000)				//16MHz
-#define PROCESSOR_CLOCK_MS		    (PROCESSOR_CLOCK/1000)
-#define FLASH_SECTOR2_BASE_ADDRESS  0x08008000
+#define COMMAND_BL_GET_VER								0x51 //Completed
+#define COMMAND_BL_GET_HELP								0x52
+#define COMMAND_BL_GET_CID								0x53
+#define COMMAND_BL_GET_RDP_STATUS						0x54
+#define COMMAND_BL_GO_TO_ADDR							0x55
+#define COMMAND_BL_FLASH_ERASE							0x56
+#define COMMAND_BL_MEM_WRITE							0x57
+#define COMMAND_BL_EN_R_W_PROTECT						0x58
+#define COMMAND_BL_MEM_READ								0x59
+#define COMMAND_BL_READ_SECTOR_P_STATUS					0x5A
+#define COMMAND_BL_OTP_READ								0x5B
+#define COMMAND_BL_DIS_R_W_PROTECT						0x5C
+#define COMMAND_BL_MY_NEW_COMMAND                      	0x5D
+#define PROCESSOR_CLOCK			    					(16000000)				//16MHz
+#define PROCESSOR_CLOCK_MS		    					(PROCESSOR_CLOCK/1000)
+#define FLASH_SECTOR2_BASE_ADDRESS  					0x08008000
 
-#define VERSION_MAJOR   '1'
-#define VERSION_MINOR   '0'
+#define VERSION_MAJOR   1
+#define VERSION_MINOR   0
 
 /*Global Variables*/
-char pBuffer[200];
+uint8_t pBuffer[200];
 
 /*Function Prototype*/
 void Jump_To_Bootloader_Code(void);
 void Jump_To_Application_Code(void);
-void BL_Flash_Erase(char *buffer);
-void BL_Flash_Write(char *buffer);
-void BL_Flash_Read(char *buffer);
-void BL_Get_Ver(char *buffer, uint8_t major, uint8_t minor);
+void BL_Flash_Erase(uint8_t *buffer);
+void BL_Flash_Write(uint8_t *buffer);
+void BL_Flash_Read(uint8_t *buffer);
+void BL_Get_Ver(uint8_t major, uint8_t minor);
+uint8_t CRC_Calculation_And_Verification(uint8_t *pBuffer, int len, uint32_t expected_crc);
+int Char2Int(char c);
 
 int main()
 {
@@ -84,28 +99,32 @@ void Jump_To_Bootloader_Code(void)
 {
 	while(1)
 	{
-		// 1. Receive a string terminated by '\n'
-		USART_ReceiveString(USART2, pBuffer);
+		//1. Receive length byte
+		pBuffer[0] = USART_ReceiveChar(USART2);
+		uint8_t len = pBuffer[0];
+		int i = 1;
 
-		// to receive back echo on terminal
-		USART_SendString(USART2, pBuffer);
+		//2. Read rest of the packet
+		while(len--)
+		{
+		    pBuffer[i++] = USART_ReceiveChar(USART2);
+		}
 
-		USART_SendString(USART2, "\r\n");
 
-		//3. Extract CMD Code
-		char CMD_Code = pBuffer[1];
+		//3. Extract CMD Code and length
+		uint8_t CMD_Code = pBuffer[1];
 
 		switch(CMD_Code)
 		{
-			case 'A':
+			case COMMAND_BL_GET_VER:
 				//BL_Gen_VER
-				BL_Get_Ver(pBuffer, VERSION_MAJOR, VERSION_MINOR);
+				BL_Get_Ver(VERSION_MAJOR, VERSION_MINOR);
 				break;
-			case 'C':
+			case COMMAND_BL_MEM_WRITE:
 				//BL_MEM_WRITE
 				BL_Flash_Write(pBuffer);
 				break;
-			case 'D':
+			case COMMAND_BL_FLASH_ERASE:
 				//BL_FLASH_ERASE
 				BL_Flash_Erase(pBuffer);
 				break;
@@ -115,19 +134,21 @@ void Jump_To_Bootloader_Code(void)
 		}
 	}
 }
-void BL_Get_Ver(char *buffer, uint8_t major, uint8_t minor)
+
+void BL_Get_Ver(uint8_t major, uint8_t minor)
 {
-	//Additionally you can add CRC
-	USART_SendString(USART2, "Version :");
+	int ack = 0xA5; //When CRC is implemented, hard-coded ack can be updated
+	int len_to_follow = 2;
+	USART_SendChar(USART2, ack); //major and minor
+	USART_SendChar(USART2, len_to_follow);
 	USART_SendChar(USART2, major);
 	USART_SendChar(USART2, minor);
-	USART_SendString(USART2, "\r\n");
 }
-void BL_Flash_Write(char *buffer)
+void BL_Flash_Write(uint8_t *buffer)
 {
 
 }
-void BL_Flash_Erase(char *buffer)
+void BL_Flash_Erase(uint8_t *buffer)
 {
 	uint32_t KEY1 = 0x45670123;
 	uint32_t KEY2 = 0xCDEF89AB;
@@ -177,63 +198,48 @@ void Jump_To_Application_Code(void)
 	Reset_Handler();
 }
 
-
-
-/*
- * Testing
- * 1. GPIO set/reset/toggle
- * 2. UART2 read write (blocking)
- * 3. UART3 read write (blocking)
- */
-
-//1. LD6 Blue - PD15
-/*
-GPIO_Config Blue_Led_Config = {
-	.port = GPIOD,
-	.pin = 15,
-	.mode = GPIO_MODE_OUTPUT,
-	.otype = GPIO_OUTPUT_PP,
-	.speed = GPIO_SPEED_MEDIUM,
-	.pull = GPIO_PULLDOWN,
-};
-
-GPIO_Init(&Blue_Led_Config);
-TIM2_Init_1msTick();
-while(1)
+// Expected: CRC32 with 0x04C11DB7 poly, initial value 0xFFFFFFFF, bit-reversed IO (hardware default)
+uint8_t CRC_Calculation_And_Verification(uint8_t *pBuffer, int len, uint32_t expected_crc)
 {
-	GPIO_SetPin(GPIOD, 15);
-	delay_ms_blocking_t2(1000);
-	GPIO_ResetPin(GPIOD, 15);
-	delay_ms_blocking_t2(1000);
+	uint8_t ret_val = 0;
+
+    // 1. Enable CRC peripheral clock
+    RCC->AHB1ENR |= RCC_AHB1ENR_CRCEN;
+
+    // 2. Reset CRC computation unit
+    CRC->CR |= CRC_CR_RESET;
+
+    // 3. Feed data as 32-bit words (LSB first due to internal input bit reversal)
+    for (int i = 0; i < len;)
+    {
+        uint32_t data = 0;
+
+        for (int j = 0; j < 4 && i < len; j++, i++)
+        {
+            data |= ((uint8_t)pBuffer[i] << (8 * j));
+        }
+
+        CRC->DR = data;
+    }
+
+    // 4. Read the CRC result
+    uint32_t computed_crc = CRC->DR;
+
+    // 5. Disable CRC peripheral (optional)
+    RCC->AHB1ENR &= ~RCC_AHB1ENR_CRCEN;
+
+    // 6. Print result (trace or UART)
+    if (computed_crc == expected_crc)
+    {
+    	ret_val = 1;
+    }
+    return ret_val;
 }
-=============================================================
-// 1. USART2 Configuration
-USART_Config UART2_Config = {USART2, 9600, USART_MODE_TX_RX};
 
-// 2. GPIO Configuration for USART2 (TX = PA2, RX = PA3)
-GPIO_Config tx = {GPIOA, 2, GPIO_MODE_AF, GPIO_OUTPUT_PP, GPIO_SPEED_HIGH, GPIO_NOPULL};
-GPIO_Config rx = {GPIOA, 3, GPIO_MODE_AF, GPIO_OUTPUT_PP, GPIO_SPEED_HIGH, GPIO_NOPULL};
-
-// 3. Initialize GPIOs
-GPIO_Init(&tx);
-GPIO_Init(&rx);
-
-// 4. Set alternate function AF7 for USART2 on PA2/PA3
-GPIOA->AFR[0] &= ~((0xF << (4 * 2)) | (0xF << (4 * 3)));
-GPIOA->AFR[0] |=  (7 << (4 * 2)) | (7 << (4 * 3));
-
-// 5. Initialize USART2
-USART_Init(&UART2_Config);
-
-*/
-
-
-
-
-
-
-
-
-
-
-
+int Char2Int(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    else
+        return -1; // Invalid input
+}

@@ -24,8 +24,8 @@ typedef struct {
 
 void USART_Init(USART_Config *cfg);
 void USART_SendChar(USART_TypeDef *usart, char c);
-void USART_SendString(USART_TypeDef *usart, const char *str);
+void USART_SendString(USART_TypeDef *usart, const uint8_t *str);
 char USART_ReceiveChar(USART_TypeDef *usart);
-void USART_ReceiveString(USART_TypeDef *usart, char *str);
+void USART_ReceiveString(USART_TypeDef *usart, uint8_t *str);
 
 #endif /* UART_H_ */
