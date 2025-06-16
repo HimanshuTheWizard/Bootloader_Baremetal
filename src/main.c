@@ -13,13 +13,27 @@
 #define COMMAND_BL_GET_RDP_STATUS						0x54
 #define COMMAND_BL_GO_TO_ADDR							0x55
 #define COMMAND_BL_FLASH_ERASE							0x56
-#define COMMAND_BL_MEM_WRITE							0x57
+#define COMMAND_BL_MEM_WRITE							0x57 //Completed
 #define COMMAND_BL_EN_R_W_PROTECT						0x58
 #define COMMAND_BL_MEM_READ								0x59
 #define COMMAND_BL_READ_SECTOR_P_STATUS					0x5A
 #define COMMAND_BL_OTP_READ								0x5B
 #define COMMAND_BL_DIS_R_W_PROTECT						0x5C
 #define COMMAND_BL_MY_NEW_COMMAND                      	0x5D
+
+/*len details of the command*/
+#define COMMAND_BL_GET_VER_LEN                              2
+#define COMMAND_BL_GET_HELP_LEN                             6
+#define COMMAND_BL_GET_CID_LEN                              6
+#define COMMAND_BL_GET_RDP_STATUS_LEN                       6
+#define COMMAND_BL_GO_TO_ADDR_LEN                           10
+#define COMMAND_BL_FLASH_ERASE_LEN                          8
+#define COMMAND_BL_MEM_WRITE_LEN                            7
+#define COMMAND_BL_EN_R_W_PROTECT_LEN                       8
+#define COMMAND_BL_READ_SECTOR_P_STATUS_LEN                 6
+#define COMMAND_BL_DIS_R_W_PROTECT_LEN                      6
+#define COMMAND_BL_MY_NEW_COMMAND_LEN                       8
+
 #define PROCESSOR_CLOCK			    					(16000000)				//16MHz
 #define PROCESSOR_CLOCK_MS		    					(PROCESSOR_CLOCK/1000)
 #define FLASH_SECTOR2_BASE_ADDRESS  					0x08008000
@@ -36,7 +50,7 @@ void Jump_To_Application_Code(void);
 void BL_Flash_Erase(uint8_t *buffer);
 void BL_Flash_Write(uint8_t *buffer);
 void BL_Flash_Read(uint8_t *buffer);
-void BL_Get_Ver(uint8_t major, uint8_t minor);
+void BL_Get_Ver(uint8_t *pBuffer, uint8_t major, uint8_t minor);
 uint8_t CRC_Calculation_And_Verification(uint8_t *pBuffer, int len, uint32_t expected_crc);
 int Char2Int(char c);
 
@@ -118,7 +132,7 @@ void Jump_To_Bootloader_Code(void)
 		{
 			case COMMAND_BL_GET_VER:
 				//BL_Gen_VER
-				BL_Get_Ver(VERSION_MAJOR, VERSION_MINOR);
+				BL_Get_Ver(pBuffer, VERSION_MAJOR, VERSION_MINOR);
 				break;
 			case COMMAND_BL_MEM_WRITE:
 				//BL_MEM_WRITE
@@ -135,7 +149,7 @@ void Jump_To_Bootloader_Code(void)
 	}
 }
 
-void BL_Get_Ver(uint8_t major, uint8_t minor)
+void BL_Get_Ver(uint8_t *pBuffer, uint8_t major, uint8_t minor)
 {
 	int ack = 0xA5; //When CRC is implemented, hard-coded ack can be updated
 	int len_to_follow = 2;
@@ -144,10 +158,64 @@ void BL_Get_Ver(uint8_t major, uint8_t minor)
 	USART_SendChar(USART2, major);
 	USART_SendChar(USART2, minor);
 }
+
 void BL_Flash_Write(uint8_t *buffer)
 {
+    const uint32_t KEY1 = 0x45670123;
+    const uint32_t KEY2 = 0xCDEF89AB;
+    uint32_t target_address = ((buffer[2]) | (buffer[3] << 8) | (buffer[4] << 16) | (buffer[5] << 24));
 
+    int i = COMMAND_BL_MEM_WRITE_LEN;
+    int len_to_follow = buffer[0];
+    int payload_len = len_to_follow - COMMAND_BL_MEM_WRITE_LEN;
+
+    int padded_len = (payload_len + 3) & ~0x03; // Round to 4-byte boundary
+
+    // Unlock flash
+    if (FLASH->CR & FLASH_CR_LOCK)
+    {
+        FLASH->KEYR = KEY1;
+        FLASH->KEYR = KEY2;
+    }
+
+    // Set PSIZE to 32-bit
+    FLASH->CR &= ~(FLASH_CR_PSIZE);
+    FLASH->CR |= (0x2 << 8); // PSIZE = 32-bit
+    FLASH->CR |= FLASH_CR_PG;
+
+    while (padded_len > 0)
+    {
+        uint32_t word = 0xFFFFFFFF;
+
+        for (int b = 0; b < 4; b++)
+		{
+			int src_index = i + b;
+			// Reverse bytes: store buffer[i] into MSB, buffer[i+3] into LSB
+			((uint8_t*)&word)[b] = buffer[src_index];
+		}
+
+        *(volatile uint32_t*)target_address = word;
+
+        while (FLASH->SR & FLASH_SR_BSY);
+
+        if (FLASH->SR & FLASH_SR_EOP)
+            FLASH->SR = FLASH_SR_EOP;
+
+        target_address += 4;
+        i += 4;
+        padded_len -= 4;
+    }
+
+    FLASH->CR &= ~FLASH_CR_PG;
+    FLASH->CR |= FLASH_CR_LOCK;
+
+    USART_SendChar(USART2, 0xA5);
+    USART_SendChar(USART2, 1);
+    USART_SendChar(USART2, 0);
 }
+
+
+
 void BL_Flash_Erase(uint8_t *buffer)
 {
 	uint32_t KEY1 = 0x45670123;
@@ -190,6 +258,8 @@ void Jump_To_Application_Code(void)
 	uint32_t sp = *(volatile uint32_t*)(FLASH_SECTOR2_BASE_ADDRESS);
 	__set_MSP(sp);
 
+	SCB->VTOR = FLASH_SECTOR2_BASE_ADDRESS;
+
 	//2. init and called reset handler
 	void (*Reset_Handler)(void);
 	uint32_t reset_handler_t;
@@ -199,6 +269,7 @@ void Jump_To_Application_Code(void)
 }
 
 // Expected: CRC32 with 0x04C11DB7 poly, initial value 0xFFFFFFFF, bit-reversed IO (hardware default)
+//this function is not is use for now, as CRC is not implemented
 uint8_t CRC_Calculation_And_Verification(uint8_t *pBuffer, int len, uint32_t expected_crc)
 {
 	uint8_t ret_val = 0;
