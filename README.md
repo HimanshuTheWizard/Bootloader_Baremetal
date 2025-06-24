@@ -4,6 +4,7 @@
 2. Application-1    -  4 sectors are reserved for application-1 (Sector 2 to Sector 5)
 3. Application-2    -  5 sectors are reserved for application-2 (Sector 6 to Sector 10)
 4. NVRAM            -  Used to store variable for boot_flag, active_app
+
 ===========================================
 
 ==== Initial Steps after factory Reset ====
@@ -20,6 +21,7 @@
 10. Reset the system
 11. This time dont press the user button and let the system boot normally.
 12. If application-1 runs successfully all four LED on board shall glow.
+
 ===================================
 
 ===== Steps to update Firmware ====
@@ -32,5 +34,6 @@
 4. Enter the correct address and and flash the appropriate image (update application.bin in python program)
 5. After flashing is done, reset the board, it shall boot with new Firmware
 6. Also, the system shall keep track which image is currently active
+
 ==================================
 
