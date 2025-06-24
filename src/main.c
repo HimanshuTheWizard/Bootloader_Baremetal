@@ -6,13 +6,13 @@
 #include "gpio.h"
 #include "timer.h"
 
-/*local macros*/
+/*==========================local macros==========================*/
 #define COMMAND_BL_GET_VER								0x51 //Completed
 #define COMMAND_BL_GET_HELP								0x52
 #define COMMAND_BL_GET_CID								0x53
 #define COMMAND_BL_GET_RDP_STATUS						0x54
 #define COMMAND_BL_GO_TO_ADDR							0x55
-#define COMMAND_BL_FLASH_ERASE							0x56
+#define COMMAND_BL_FLASH_ERASE							0x56 //Completed
 #define COMMAND_BL_MEM_WRITE							0x57 //Completed
 #define COMMAND_BL_EN_R_W_PROTECT						0x58
 #define COMMAND_BL_MEM_READ								0x59
@@ -27,7 +27,7 @@
 #define COMMAND_BL_GET_CID_LEN                              6
 #define COMMAND_BL_GET_RDP_STATUS_LEN                       6
 #define COMMAND_BL_GO_TO_ADDR_LEN                           10
-#define COMMAND_BL_FLASH_ERASE_LEN                          8
+#define COMMAND_BL_FLASH_ERASE_LEN                          4
 #define COMMAND_BL_MEM_WRITE_LEN                            7
 #define COMMAND_BL_EN_R_W_PROTECT_LEN                       8
 #define COMMAND_BL_READ_SECTOR_P_STATUS_LEN                 6
@@ -36,26 +36,45 @@
 
 #define PROCESSOR_CLOCK			    					(16000000)				//16MHz
 #define PROCESSOR_CLOCK_MS		    					(PROCESSOR_CLOCK/1000)
+
 #define FLASH_SECTOR2_BASE_ADDRESS  					0x08008000
+#define FLASH_SECTOR6_BASE_ADDRESS						0x08040000
 
 #define VERSION_MAJOR   1
 #define VERSION_MINOR   0
 
-/*Global Variables*/
-uint8_t pBuffer[200];
+#define METADATA_SECTOR 11
+#define BOOT_METADATA_ADDR ((uint32_t)0x080E0000)  // Choose a safe sector (11)
 
-/*Function Prototype*/
-void Jump_To_Bootloader_Code(void);
-void Jump_To_Application_Code(void);
+typedef struct __attribute__((__packed__)) {
+    uint8_t boot_flag;      // Use uint8_t for 0xB007B007
+    uint8_t active_app;      // 1 or 2
+    uint8_t reserved[3];     // Padding to make structure 8 bytes (aligned to word)
+} Boot_Metadata;
+
+/*==========================Global Variables==========================*/
+uint8_t pBuffer[200];
+volatile uint8_t indicator_flag = 0;
+
+/*==========================Function Prototype==========================*/
+void Jump_To_Bootloader_Code(Boot_Metadata boot_data);
+void Jump_To_Application_Code(Boot_Metadata boot_data);
 void BL_Flash_Erase(uint8_t *buffer);
-void BL_Flash_Write(uint8_t *buffer);
+void BL_Flash_Write(uint8_t *buffer, Boot_Metadata boot_data);
 void BL_Flash_Read(uint8_t *buffer);
 void BL_Get_Ver(uint8_t *pBuffer, uint8_t major, uint8_t minor);
 uint8_t CRC_Calculation_And_Verification(uint8_t *pBuffer, int len, uint32_t expected_crc);
 int Char2Int(char c);
+Boot_Metadata Read_Boot_Metadata(void);
+void WriteBootMetadata(uint8_t boot_flag, uint8_t active_app);
+
 
 int main()
 {
+	Boot_Metadata boot_data = {0};
+
+	boot_data = Read_Boot_Metadata();
+
 	//1. Initialize user button on board - PA0
 	GPIO_Config User_Button_Config =
 	{
@@ -97,20 +116,23 @@ int main()
 
 	while (1)
 	{
-		if(GPIO_ReadPin(GPIOA, 0) == GPIO_PIN_SET)
+		if((GPIO_ReadPin(GPIOA, 0) == GPIO_PIN_SET) || (boot_data.boot_flag == 1))
 		{
-			Jump_To_Bootloader_Code();
+			Jump_To_Bootloader_Code(boot_data);
 		}
 		else
 		{
-			Jump_To_Application_Code();
+			Jump_To_Application_Code(boot_data);
 		}
 	}
 }
-
-
-void Jump_To_Bootloader_Code(void)
+/*==========================Function Definitions==========================*/
+void Jump_To_Bootloader_Code(Boot_Metadata boot_data)
 {
+	uint8_t dummy;
+	dummy = USART_ReceiveChar(USART2);
+	//send to user which version of FW is active and running
+	USART_SendChar(USART2, boot_data.active_app);
 	while(1)
 	{
 		//1. Receive length byte
@@ -124,7 +146,6 @@ void Jump_To_Bootloader_Code(void)
 		    pBuffer[i++] = USART_ReceiveChar(USART2);
 		}
 
-
 		//3. Extract CMD Code and length
 		uint8_t CMD_Code = pBuffer[1];
 
@@ -136,7 +157,7 @@ void Jump_To_Bootloader_Code(void)
 				break;
 			case COMMAND_BL_MEM_WRITE:
 				//BL_MEM_WRITE
-				BL_Flash_Write(pBuffer);
+				BL_Flash_Write(pBuffer, boot_data);
 				break;
 			case COMMAND_BL_FLASH_ERASE:
 				//BL_FLASH_ERASE
@@ -159,7 +180,7 @@ void BL_Get_Ver(uint8_t *pBuffer, uint8_t major, uint8_t minor)
 	USART_SendChar(USART2, minor);
 }
 
-void BL_Flash_Write(uint8_t *buffer)
+void BL_Flash_Write(uint8_t *buffer, Boot_Metadata boot_data)
 {
     const uint32_t KEY1 = 0x45670123;
     const uint32_t KEY2 = 0xCDEF89AB;
@@ -212,8 +233,21 @@ void BL_Flash_Write(uint8_t *buffer)
     USART_SendChar(USART2, 0xA5);
     USART_SendChar(USART2, 1);
     USART_SendChar(USART2, 0);
-}
 
+
+    if((boot_data.active_app == 1) && (boot_data.boot_flag == 1))
+    {
+    	WriteBootMetadata(0, 2);
+    }
+    else if((boot_data.active_app == 2) && (boot_data.boot_flag == 1))
+    {
+    	WriteBootMetadata(0, 1);
+    }
+	else
+	{
+		//do  nothing
+	}
+}
 
 
 void BL_Flash_Erase(uint8_t *buffer)
@@ -227,7 +261,9 @@ void BL_Flash_Erase(uint8_t *buffer)
 	FLASH->KEYR = KEY1;
 	FLASH->KEYR = KEY2;
 	//any wrong sequence returns the bus error, check the same.
-
+	USART_SendChar(USART2, 0xA5);
+	USART_SendChar(USART2, 1);
+	USART_SendChar(USART2, 0);
 	while(num_of_sec)
 	{
 		//2. Check that no flash memory operation is ongoing
@@ -251,19 +287,46 @@ void BL_Flash_Erase(uint8_t *buffer)
 	//7. lock the flash
 	FLASH->CR |= (1<<31);
 }
-
-void Jump_To_Application_Code(void)
+#define APP1_ADD   (uint32_t)0x08008000
+#define APP2_ADD   (uint32_t)0x08040000
+void Jump_To_Application_Code(Boot_Metadata boot_data_l)
 {
+	uint32_t APPLICATION_BASE_ADDRESS;
+
+	//if this is first time system is booting to application after flash
+	if(boot_data_l.active_app == 0xFF)
+	{
+		if (*(uint32_t *)APP1_ADD == 0xFFFFFFFF)
+		{
+		    APPLICATION_BASE_ADDRESS = FLASH_SECTOR6_BASE_ADDRESS;
+		}
+		else if (*(uint32_t *)APP2_ADD == 0xFFFFFFFF)
+		{
+		    APPLICATION_BASE_ADDRESS = FLASH_SECTOR2_BASE_ADDRESS;
+		}
+		else
+		{
+		    // do nothing
+		}
+	}
+	else
+	{
+		if (boot_data_l.active_app == 1)
+			APPLICATION_BASE_ADDRESS = FLASH_SECTOR2_BASE_ADDRESS;
+		else
+			APPLICATION_BASE_ADDRESS = FLASH_SECTOR6_BASE_ADDRESS;
+	}
+
 	//1. init stack pointer
-	uint32_t sp = *(volatile uint32_t*)(FLASH_SECTOR2_BASE_ADDRESS);
+	uint32_t sp = *(volatile uint32_t*)(APPLICATION_BASE_ADDRESS);
 	__set_MSP(sp);
 
-	SCB->VTOR = FLASH_SECTOR2_BASE_ADDRESS;
+	SCB->VTOR = APPLICATION_BASE_ADDRESS;
 
 	//2. init and called reset handler
 	void (*Reset_Handler)(void);
 	uint32_t reset_handler_t;
-	reset_handler_t = *(volatile uint32_t*)(FLASH_SECTOR2_BASE_ADDRESS + 4);
+	reset_handler_t = *(volatile uint32_t*)(APPLICATION_BASE_ADDRESS + 4);
 	Reset_Handler = (void *)reset_handler_t;
 	Reset_Handler();
 }
@@ -314,3 +377,51 @@ int Char2Int(char c)
     else
         return -1; // Invalid input
 }
+
+Boot_Metadata Read_Boot_Metadata(void)
+{
+    return *(Boot_Metadata *)BOOT_METADATA_ADDR;
+}
+
+void WriteBootMetadata(uint8_t boot_flag, uint8_t active_app)
+{
+    uint32_t FLASH_METADATA_ADDR = BOOT_METADATA_ADDR;
+    const uint32_t KEY1 = 0x45670123;
+    const uint32_t KEY2 = 0xCDEF89AB;
+
+    // Unlock flash
+    if (FLASH->CR & FLASH_CR_LOCK)
+    {
+        FLASH->KEYR = KEY1;
+        FLASH->KEYR = KEY2;
+    }
+
+    // Erase sector
+    FLASH->CR &= ~FLASH_CR_SNB;
+    FLASH->CR |= (METADATA_SECTOR << 3); // sector 11
+    FLASH->CR |= FLASH_CR_SER;
+    FLASH->CR |= FLASH_CR_STRT;
+    while (FLASH->SR & FLASH_SR_BSY);
+    FLASH->CR &= ~FLASH_CR_SER;
+
+    // Set programming size to 32-bit
+    FLASH->CR &= ~(FLASH_CR_PSIZE);
+    FLASH->CR |= (2U << 8); // PSIZE = 32-bit
+
+    // Write data
+    FLASH->CR |= FLASH_CR_PG;
+
+    Boot_Metadata metadata = { boot_flag, active_app, {0} };
+    uint32_t *src = (uint32_t *)&metadata;
+    volatile uint32_t *dst = (uint32_t *)FLASH_METADATA_ADDR;
+
+    dst[0] = src[0];
+    dst[1] = src[1];
+
+    while (FLASH->SR & FLASH_SR_BSY);
+
+    FLASH->CR &= ~FLASH_CR_PG;
+    FLASH->CR |= FLASH_CR_LOCK;
+}
+
+

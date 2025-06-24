@@ -244,6 +244,14 @@ SECTIONS
 
     } >FLASH
 
+    .boot_metadata (NOLOAD) : 
+    {
+        . = ALIGN(4);
+        KEEP(*(.boot_metadata))
+        . = ALIGN(4);
+    } >FLASH_METADATA
+
+
 	/* ARM magic sections */
 	.ARM.extab : ALIGN(4)
    	{
