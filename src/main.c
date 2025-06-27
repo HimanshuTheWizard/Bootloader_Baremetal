@@ -6,6 +6,16 @@
 #include "gpio.h"
 #include "timer.h"
 
+/*
+=========== Improvements Pending ====================
+1. Calculate CRC on (pay-load - CRC_Received)
+2. Can additionally enable the watch-dog
+3. SHA key verification in boot-loading
+4. Add debugging and tracing
+5. Explore if Reset_handlers can be optimized
+=====================================================
+*/
+
 /*==========================local macros==========================*/
 #define COMMAND_BL_GET_VER								0x51 //Completed
 #define COMMAND_BL_GET_HELP								0x52
@@ -40,6 +50,9 @@
 #define FLASH_SECTOR2_BASE_ADDRESS  					0x08008000
 #define FLASH_SECTOR6_BASE_ADDRESS						0x08040000
 
+#define APP1_ADD   (uint32_t)0x08008000
+#define APP2_ADD   (uint32_t)0x08040000
+
 #define VERSION_MAJOR   1
 #define VERSION_MINOR   0
 
@@ -47,7 +60,7 @@
 #define BOOT_METADATA_ADDR ((uint32_t)0x080E0000)  // Choose a safe sector (11)
 
 typedef struct __attribute__((__packed__)) {
-    uint8_t boot_flag;      // Use uint8_t for 0xB007B007
+    uint8_t boot_flag;       // 0 or 1
     uint8_t active_app;      // 1 or 2
     uint8_t reserved[3];     // Padding to make structure 8 bytes (aligned to word)
 } Boot_Metadata;
@@ -64,7 +77,6 @@ void BL_Flash_Write(uint8_t *buffer, Boot_Metadata boot_data);
 void BL_Flash_Read(uint8_t *buffer);
 void BL_Get_Ver(uint8_t *pBuffer, uint8_t major, uint8_t minor);
 uint8_t CRC_Calculation_And_Verification(uint8_t *pBuffer, int len, uint32_t expected_crc);
-int Char2Int(char c);
 Boot_Metadata Read_Boot_Metadata(void);
 void WriteBootMetadata(uint8_t boot_flag, uint8_t active_app);
 
@@ -72,7 +84,6 @@ void WriteBootMetadata(uint8_t boot_flag, uint8_t active_app);
 int main()
 {
 	Boot_Metadata boot_data = {0};
-
 	boot_data = Read_Boot_Metadata();
 
 	//1. Initialize user button on board - PA0
@@ -116,6 +127,8 @@ int main()
 
 	while (1)
 	{
+		//when running boot-loader for first time after factory reset, need to press user button
+		//to get into bootloading mode.
 		if((GPIO_ReadPin(GPIOA, 0) == GPIO_PIN_SET) || (boot_data.boot_flag == 1))
 		{
 			Jump_To_Bootloader_Code(boot_data);
@@ -126,6 +139,7 @@ int main()
 		}
 	}
 }
+
 /*==========================Function Definitions==========================*/
 void Jump_To_Bootloader_Code(Boot_Metadata boot_data)
 {
@@ -148,6 +162,11 @@ void Jump_To_Bootloader_Code(Boot_Metadata boot_data)
 
 		//3. Extract CMD Code and length
 		uint8_t CMD_Code = pBuffer[1];
+
+		//TO-DO - extract bytes representing CRC
+		//Calculate CRC on payload and compare with received CRC
+		//If mismatch - send message to user application
+		//Terminate the function
 
 		switch(CMD_Code)
 		{
@@ -234,7 +253,13 @@ void BL_Flash_Write(uint8_t *buffer, Boot_Metadata boot_data)
     USART_SendChar(USART2, 1);
     USART_SendChar(USART2, 0);
 
-
+    /*
+    Since user is informed which application section is active
+    it is assumed that he chose address of another one to flash
+    updated image. Hence, here we update the active app flag
+    to make it more protected, we can chose to hard-code the address
+    application is supposed to flashed instead of asking from user
+    */
     if((boot_data.active_app == 1) && (boot_data.boot_flag == 1))
     {
     	WriteBootMetadata(0, 2);
@@ -287,8 +312,7 @@ void BL_Flash_Erase(uint8_t *buffer)
 	//7. lock the flash
 	FLASH->CR |= (1<<31);
 }
-#define APP1_ADD   (uint32_t)0x08008000
-#define APP2_ADD   (uint32_t)0x08040000
+
 void Jump_To_Application_Code(Boot_Metadata boot_data_l)
 {
 	uint32_t APPLICATION_BASE_ADDRESS;
@@ -296,10 +320,17 @@ void Jump_To_Application_Code(Boot_Metadata boot_data_l)
 	//if this is first time system is booting to application after flash
 	if(boot_data_l.active_app == 0xFF)
 	{
-		if (*(uint32_t *)APP1_ADD == 0xFFFFFFFF)
+		//if both the sections are empty, system gets reset
+		if((*(uint32_t *)APP1_ADD == 0xFFFFFFFF) && (*(uint32_t *)APP2_ADD == 0xFFFFFFFF))
+		{
+			NVIC_SystemReset();
+		}
+		//if section 1 is empty, address of section 2 is loaded
+	    else if (*(uint32_t *)APP1_ADD == 0xFFFFFFFF)
 		{
 		    APPLICATION_BASE_ADDRESS = FLASH_SECTOR6_BASE_ADDRESS;
 		}
+		//if section 2 is empty, address of section 1 is loaded
 		else if (*(uint32_t *)APP2_ADD == 0xFFFFFFFF)
 		{
 		    APPLICATION_BASE_ADDRESS = FLASH_SECTOR2_BASE_ADDRESS;
@@ -311,6 +342,7 @@ void Jump_To_Application_Code(Boot_Metadata boot_data_l)
 	}
 	else
 	{
+		/*will jump to reset vector of the application that is active*/
 		if (boot_data_l.active_app == 1)
 			APPLICATION_BASE_ADDRESS = FLASH_SECTOR2_BASE_ADDRESS;
 		else
@@ -368,14 +400,6 @@ uint8_t CRC_Calculation_And_Verification(uint8_t *pBuffer, int len, uint32_t exp
     	ret_val = 1;
     }
     return ret_val;
-}
-
-int Char2Int(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    else
-        return -1; // Invalid input
 }
 
 Boot_Metadata Read_Boot_Metadata(void)
