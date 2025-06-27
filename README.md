@@ -1,3 +1,6 @@
+**Platform : ** ARM Cortex M4 - STM32F407G Disc1 board
+**Editor and Compiler: ** Eclipse with ARM-none-eabi-gcc compiler
+
 === Flash is divided into three sections ====
 =============================================
 1. Bootloader       -  First two sectors are reserved for bootloader (Sector 0 and Sector 1)
